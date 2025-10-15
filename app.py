@@ -1,6 +1,5 @@
-import math
+﻿import math
 import os
-import re
 from datetime import datetime, timedelta
 from typing import List
 
@@ -13,57 +12,58 @@ st.set_page_config(page_title="CADC MP Forecast Tool", page_icon="📦", layout=
 st.markdown(
     """
     <style>
-        div[data-testid="stAppViewContainer"] {
-            background: radial-gradient(circle at top, #f3f0ff 0%, #ffffff 55%, #f7f9ff 100%);
+        div[data-testid=\"stAppViewContainer\"] {
+            background: radial-gradient(circle at top, #f4f2ff 0%, #ffffff 55%, #f7f9ff 100%);
             padding: 2rem 0 3rem;
         }
-
         .hero-card {
-            background: rgba(255, 255, 255, 0.88);
-            border-radius: 20px;
-            padding: 26px 34px;
-            box-shadow: 0 14px 35px rgba(122, 104, 210, 0.15);
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 24px;
+            padding: 28px 38px;
+            box-shadow: 0 18px 40px rgba(124, 104, 210, 0.18);
             border: 1px solid rgba(135, 115, 210, 0.25);
             margin-bottom: 2rem;
         }
-
         .hero-card h1 {
-            font-size: 2.1rem;
+            font-size: 2.2rem;
             margin: 0;
             color: #2a1d52;
         }
-
-        .section-box {
-            background: rgba(255, 255, 255, 0.94);
-            border-radius: 18px;
-            padding: 20px 24px;
-            box-shadow: 0 10px 25px rgba(135, 115, 210, 0.10);
-            border: 1px solid rgba(153, 128, 226, 0.20);
-            margin-bottom: 1.5rem;
+        .hero-card p {
+            margin: 0.45rem 0 0;
+            color: #534884;
         }
-
+        .section-box {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 24px 28px;
+            box-shadow: 0 16px 34px rgba(135, 115, 210, 0.15);
+            border: 1px solid rgba(151, 128, 226, 0.18);
+            margin-bottom: 1.8rem;
+        }
         .section-title {
-            font-size: 1.25rem;
+            font-size: 1.3rem;
             font-weight: 700;
             color: #3a296f;
             margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
         }
-
         div.stButton > button {
             border-radius: 12px;
             border: none;
-            background: linear-gradient(135deg, #755dd8, #f18fb1);
+            background: linear-gradient(135deg, #7c5edf, #f29bc1);
             color: white;
             font-weight: 600;
             letter-spacing: 0.04em;
             padding: 0.6rem 1.2rem;
-            box-shadow: 0 10px 24px rgba(121, 87, 216, 0.25);
-            transition: all 0.2s ease-in-out;
+            box-shadow: 0 14px 28px rgba(121, 87, 216, 0.25);
+            transition: all 0.18s ease-in-out;
         }
-
         div.stButton > button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 16px 32px rgba(121, 87, 216, 0.35);
+            box-shadow: 0 18px 36px rgba(121, 87, 216, 0.32);
         }
     </style>
     """,
@@ -74,7 +74,7 @@ st.markdown(
     """
     <div class="hero-card">
         <h1>📦 CADC Manpower Forecast Tool</h1>
-        <p>📅 Week-over-week carryover, holiday handling, and 3-3-0 SLA distribution</p>
+        <p>📅 Handles carryover, holidays, and 3-3-0 SLA distribution across the week.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -82,30 +82,16 @@ st.markdown(
 
 # ============================= CONSTANTS =============================
 ORDERS_PER_HOUR = 15
-HOURS_PER_SHIFT = 8
+HOURS_PER_SHIFT = 6
 PICKING_RATE = 95
-PICKS_PER_ORDER = 4
 RUNNER_RATIO = 5
 DATA_FILE = "forecast_history.csv"
 CARRY_FILE = "carryover_log.csv"
 
 # ============================= HELPERS =============================
-def clean_column_name(name: str) -> str:
-    cleaned = re.sub(r"[\r\n\t]+", " ", str(name))
-    cleaned = re.sub(r"[^0-9a-zA-Z]+", " ", cleaned)
-    return cleaned.strip().lower()
-
-def parse_numeric(values, default=0, dtype=int):
-    if isinstance(values, pd.Series):
-        series = values
-    else:
-        series = pd.Series(values)
-    cleaned = series.astype(str).str.replace(r"[^\d\.-]", "", regex=True).replace("", pd.NA)
-    numeric = pd.to_numeric(cleaned, errors="coerce").fillna(default)
-    return numeric.astype(dtype)
-
 def day_name(dt: datetime.date) -> str:
     return dt.strftime("%A")
+
 
 def is_working_day(name: str, is_peak: bool, is_holiday: bool) -> bool:
     if is_holiday:
@@ -114,11 +100,46 @@ def is_working_day(name: str, is_peak: bool, is_holiday: bool) -> bool:
         return name != "Sunday"
     return name not in ("Saturday", "Sunday")
 
+
 def next_working_index(start: int, names: List[str], peaks: List[bool], holidays: List[bool]):
     for j in range(start + 1, len(names)):
         if is_working_day(names[j], peaks[j], holidays[j]):
             return j
     return None
+
+
+def load_history_defaults(week_end_date: datetime.date) -> dict:
+    defaults: dict[str, tuple[int, bool, bool]] = {}
+    if not os.path.exists(DATA_FILE):
+        return defaults
+    try:
+        history_df = pd.read_csv(DATA_FILE)
+        if "WeekEnd" not in history_df.columns:
+            return defaults
+        key = week_end_date.strftime("%Y-%m-%d")
+        subset = history_df[history_df["WeekEnd"] == key]
+        if subset.empty or "Date" not in subset.columns:
+            return defaults
+        for _, row in subset.iterrows():
+            try:
+                row_date = pd.to_datetime(row["Date"]).date()
+            except Exception:
+                continue
+            try:
+                orders_val = int(float(row.get("Orders", 0)))
+            except Exception:
+                orders_val = 0
+            peak_val = row.get("IsPeak", False)
+            if isinstance(peak_val, str):
+                peak_val = peak_val.strip().lower() == "true"
+            holiday_val = row.get("IsHoliday", False)
+            if isinstance(holiday_val, str):
+                holiday_val = holiday_val.strip().lower() == "true"
+            defaults[str(row_date)] = (orders_val, bool(peak_val), bool(holiday_val))
+    except Exception:
+        defaults = {}
+    return defaults
+
 
 # ============================= INPUT SECTION =============================
 st.markdown('<div class="section-box"><div class="section-title">⚙️ Weekly Inputs</div>', unsafe_allow_html=True)
@@ -133,7 +154,7 @@ with col_c:
 
 week_end = st.date_input("📅 Week End Date (Saturday)")
 if week_end.weekday() != 5:
-    st.warning("⚠️ Expected a Saturday week end. The tool assumes the previous Sunday as the start.")
+    st.warning("⚠️ Expected a Saturday week end. The previous Sunday will be used as the start.")
 week_start = week_end - timedelta(days=6)
 week_dates = [week_start + timedelta(days=i) for i in range(7)]
 prev_saturday = week_start - timedelta(days=1)
@@ -141,10 +162,11 @@ prev_saturday = week_start - timedelta(days=1)
 carry_default = 0
 if os.path.exists(CARRY_FILE):
     carry_log = pd.read_csv(CARRY_FILE)
-    col = "SaturdayOrders" if "SaturdayOrders" in carry_log.columns else "CarryOverOut" if "CarryOverOut" in carry_log.columns else None
-    if col and not carry_log.empty:
-        carry_default = float(carry_log[col].iloc[-1])
-        st.info(f"📦 Carryover from previous Saturday: **{carry_default:,.0f} orders**")
+    if not carry_log.empty:
+        column = "SaturdayOrders" if "SaturdayOrders" in carry_log.columns else None
+        if column:
+            carry_default = float(carry_log[column].iloc[-1])
+            st.info(f"📦 Carryover from previous Saturday: **{carry_default:,.0f} orders**")
 
 prev_sat_orders = st.number_input(
     f"📦 Previous Saturday ({prev_saturday.strftime('%a %b %d, %Y')}) Orders",
@@ -153,23 +175,26 @@ prev_sat_orders = st.number_input(
     step=1,
 )
 
+history_defaults = load_history_defaults(week_end)
+
 st.markdown("#### 🧾 Daily Orders & Flags")
 orders, peaks, holidays = [], [], []
 for dt in week_dates:
     label = dt.strftime("%a %b %d, %Y")
+    default_orders, default_peak, default_holiday = history_defaults.get(str(dt), (0, False, False))
     c1, c2, c3 = st.columns([1.5, 0.6, 0.6])
-    val = c1.number_input(label, min_value=0, step=1, value=0, key=f"orders_{dt}")
-    peak_flag = c2.checkbox("Peak", key=f"peak_{dt}")
-    holiday_flag = c3.checkbox("Holiday", key=f"holiday_{dt}")
+    val = c1.number_input(label, min_value=0, step=1, value=int(default_orders), key=f"orders_{week_end}_{dt}")
+    peak_flag = c2.checkbox("Peak", value=default_peak, key=f"peak_{week_end}_{dt}")
+    holiday_flag = c3.checkbox("Holiday", value=default_holiday, key=f"holiday_{week_end}_{dt}")
     orders.append(val)
     peaks.append(peak_flag)
     holidays.append(holiday_flag)
-
 st.markdown("</div>", unsafe_allow_html=True)
+
+original_orders = orders.copy()
 
 # ============================= CALCULATIONS =============================
 day_names = [day_name(dt) for dt in week_dates]
-shifts = [3 if peaks[i] else 2 for i in range(len(week_dates))]
 
 Day1 = [o * 0.5 for o in orders]
 Day2 = [o * 0.5 for o in orders]
@@ -177,7 +202,6 @@ Day2 = [o * 0.5 for o in orders]
 FriAdj = [0.0] * 7
 MonAdj = [0.0] * 7
 TueAdj = [0.0] * 7
-
 for i, name in enumerate(day_names):
     if name == "Friday" and i >= 1:
         FriAdj[i] = orders[i] + Day2[i - 1]
@@ -211,8 +235,8 @@ for i, name in enumerate(day_names):
         normal_val = Day1[i] + (Day2[i - 1] if i > 0 else 0.0)
     NormalSLA.append(normal_val)
 
-base_sla = [PeakSLA[i] if peaks[i] else NormalSLA[i] for i in range(7)]
-processed = base_sla[:]
+processed = [PeakSLA[i] if peaks[i] else NormalSLA[i] for i in range(7)]
+
 for i in range(7):
     if holidays[i] and processed[i] > 0:
         carry = processed[i]
@@ -221,27 +245,23 @@ for i in range(7):
         if nxt is not None:
             processed[nxt] += carry
 
-process_series = pd.Series(processed)
 pack_hc, pick_hc, total_hc, mp_required = [], [], [], []
-for i, orders_today in enumerate(process_series):
+for i, orders_today in enumerate(processed):
     if orders_today <= 0:
         pack_hc.append(0.0)
         pick_hc.append(0.0)
         total_hc.append(0)
         mp_required.append(0)
         continue
-
-    shift_count = shifts[i]
-    pack = orders_today / (ORDERS_PER_HOUR * HOURS_PER_SHIFT * shift_count)
-    pick = (orders_today / PICKS_PER_ORDER) / (PICKING_RATE * HOURS_PER_SHIFT * shift_count)
+    pack = orders_today / (ORDERS_PER_HOUR * HOURS_PER_SHIFT)
+    pick = orders_today / (PICKING_RATE * HOURS_PER_SHIFT)
     runner = pack / RUNNER_RATIO
     total = math.ceil(pack + pick + runner)
-
     pack_hc.append(round(pack, 2))
     pick_hc.append(round(pick, 2))
     total_hc.append(total)
-    mp = total + retail_ttb - fte_present + ft_off
-    mp_required.append(max(0, math.ceil(mp)))
+    mp_required.append(max(0, math.ceil(total + retail_ttb - fte_present + ft_off)))
+
 
 df = pd.DataFrame({
     "Date": week_dates,
@@ -269,67 +289,55 @@ st.markdown('<div class="section-box"><div class="section-title">📈 Weekly Tot
 total_processed_week = df["Processed Orders"].sum()
 total_hc_week = df["TotalHC"].sum()
 total_mp_week = df["MPRequired"].sum()
-c1, c2, c3 = st.columns(3)
-c1.metric("✅ Processed Orders", f"{total_processed_week:,.0f}")
-c2.metric("👷 Total HC", f"{total_hc_week:,.0f}")
-c3.metric("🧑‍🔧 Total MP Required", f"{total_mp_week:,.0f}")
+col1, col2, col3 = st.columns(3)
+col1.metric("✅ Processed Orders", f"{total_processed_week:,.0f}")
+col2.metric("👷 Total HC", f"{total_hc_week:,.0f}")
+col3.metric("🧑‍🔧 Total MP Required", f"{total_mp_week:,.0f}")
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================= SAVE HISTORY =============================
 st.markdown('<div class="section-box"><div class="section-title">💾 Save Forecast</div>', unsafe_allow_html=True)
 
-# --- Save Weekly Forecast ---
 if st.button("💾 Save Weekly Forecast"):
-    week_end_date = week_end.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
     df_to_store = df.copy()
-    df_to_store["WeekEnd"] = week_end_date
-
+    df_to_store["WeekEnd"] = week_end_str
     week_exists = False
 
-    # ====== HANDLE FORECAST HISTORY ======
     if os.path.exists(DATA_FILE):
         hist = pd.read_csv(DATA_FILE)
-        if "WeekEnd" in hist.columns and week_end_date in hist["WeekEnd"].values:
+        if "WeekEnd" in hist.columns and week_end_str in hist["WeekEnd"].values:
             week_exists = True
-            hist = hist[hist["WeekEnd"] != week_end_date]  # remove old week first
+            hist = hist[hist["WeekEnd"] != week_end_str]
         hist = pd.concat([hist, df_to_store], ignore_index=True)
     else:
         hist = df_to_store
-
     hist.to_csv(DATA_FILE, index=False)
 
-    # ====== HANDLE CARRYOVER ======
-    saturday_orders = float(df[df["Day"] == "Saturday"]["Orders"].iloc[0])
-    carry_entry = pd.DataFrame({"Week_End_Date": [week_end_date], "SaturdayOrders": [saturday_orders]})
-
+    saturday_orders = float(df[df["Day"] == "Saturday"]["Orders"].iloc[0]) if "Saturday" in df["Day"].values else 0.0
+    carry_entry = pd.DataFrame({"Week_End_Date": [week_end_str], "SaturdayOrders": [saturday_orders]})
     if os.path.exists(CARRY_FILE):
         carry_hist = pd.read_csv(CARRY_FILE)
-        if "Week_End_Date" in carry_hist.columns and week_end_date in carry_hist["Week_End_Date"].values:
-            carry_hist = carry_hist[carry_hist["Week_End_Date"] != week_end_date]  # overwrite
+        if "Week_End_Date" in carry_hist.columns and week_end_str in carry_hist["Week_End_Date"].values:
+            carry_hist = carry_hist[carry_hist["Week_End_Date"] != week_end_str]
         carry_hist = pd.concat([carry_hist, carry_entry], ignore_index=True)
     else:
         carry_hist = carry_entry
-
     carry_hist.to_csv(CARRY_FILE, index=False)
 
-    # ====== SUCCESS BANNER ======
     if week_exists:
-        st.success(f"✅ Week overwritten successfully for **{week_end_date}**", icon="✅")
+        st.success(f"✅ Week overwritten successfully for **{week_end_str}**")
     else:
-        st.success(f"✅ Week added successfully for **{week_end_date}**", icon="✅")
+        st.success(f"✅ Week added successfully for **{week_end_str}**")
 
-# --- Reset Tables ---
 st.markdown("---")
 if st.button("🧹 Reset Forecast & Carryover Tables"):
-    if os.path.exists(DATA_FILE):
-        os.remove(DATA_FILE)
-    if os.path.exists(CARRY_FILE):
-        os.remove(CARRY_FILE)
+    for file in [DATA_FILE, CARRY_FILE]:
+        if os.path.exists(file):
+            os.remove(file)
     st.toast("🧾 All forecast and carryover data cleared.", icon="✅")
-    st.rerun()
-
+    st.experimental_rerun()
 st.markdown("</div>", unsafe_allow_html=True)
-
 
 # ============================= HISTORY =============================
 st.divider()
@@ -345,9 +353,8 @@ st.markdown('<div class="section-box"><div class="section-title">📦 Carryover 
 if os.path.exists(CARRY_FILE):
     carry_hist = pd.read_csv(CARRY_FILE)
     st.dataframe(carry_hist, use_container_width=True)
-    carry_col = 'SaturdayOrders' if 'SaturdayOrders' in carry_hist.columns else 'CarryOverOut'
-    if carry_col in carry_hist:
-        st.caption(f"📊 Total Saturday orders logged: **{carry_hist[carry_col].sum():,.0f}**")
+    if "SaturdayOrders" in carry_hist.columns:
+        st.caption(f"📊 Total Saturday orders logged: **{carry_hist['SaturdayOrders'].sum():,.0f}**")
 else:
     st.info("ℹ️ No carryover history yet.")
 st.markdown("</div>", unsafe_allow_html=True)
