@@ -1,0 +1,18 @@
+Date,Brand,Total Orders,Packing HC,Picking HC,Total HC,FTE Present,MP Required,Is Peak,Is Holiday,Arrival Orders,Processed Orders
+2025-10-09,Estee Lauder,24234.0,67.32,0.66,67.98,11,56.98,True,False,,
+2025-10-09,Estee Lauder,4213.0,17.55,0.17,17.73,11,6.73,False,False,,
+2025-10-09,Estee Lauder,0.0,0.0,0.0,0.0,11,0.0,False,False,,
+2025-10-12,Estee Lauder,,0.0,0.0,0.0,11,,False,False,240.0,0.0
+2025-10-12,Clinique,,0.0,0.0,0.0,11,,False,False,1135.0,0.0
+2025-10-13,Estee Lauder,,0.0,0.0,0.0,11,,False,True,251.0,0.0
+2025-10-13,Clinique,,0.0,0.0,0.0,11,,False,True,1044.0,0.0
+2025-10-14,Estee Lauder,,3.0,1.0,4.0,11,,False,False,247.0,614.5
+2025-10-14,Clinique,,10.0,1.0,11.0,11,,False,False,420.0,2389.0
+2025-10-15,Estee Lauder,,2.0,1.0,3.0,11,,False,False,236.0,241.5
+2025-10-15,Clinique,,2.0,1.0,3.0,11,,False,False,473.0,446.5
+2025-10-16,Estee Lauder,,1.0,1.0,2.0,11,,False,False,238.0,237.0
+2025-10-16,Clinique,,2.0,1.0,3.0,11,,False,False,482.0,477.5
+2025-10-17,Estee Lauder,,3.0,1.0,4.0,11,,False,False,198.0,534.0
+2025-10-17,Clinique,,12.0,1.0,13.0,11,,False,False,1399.0,2771.0
+2025-10-18,Estee Lauder,,0.0,0.0,0.0,11,,False,False,217.0,0.0
+2025-10-18,Clinique,,0.0,0.0,0.0,11,,False,False,1131.0,0.0
