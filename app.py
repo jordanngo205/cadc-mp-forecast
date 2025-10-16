@@ -1,7 +1,7 @@
 ﻿import math
 import os
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -12,16 +12,16 @@ st.set_page_config(page_title="CADC MP Forecast Tool", page_icon="📦", layout=
 st.markdown(
     """
     <style>
-        div[data-testid=\"stAppViewContainer\"] {
+        div[data-testid="stAppViewContainer"] {
             background: radial-gradient(circle at top, #f4f2ff 0%, #ffffff 55%, #f7f9ff 100%);
             padding: 2rem 0 3rem;
         }
         .hero-card {
             background: rgba(255, 255, 255, 0.9);
             border-radius: 24px;
-            padding: 28px 38px;
+            padding: 30px 40px;
             box-shadow: 0 18px 40px rgba(124, 104, 210, 0.18);
-            border: 1px solid rgba(135, 115, 210, 0.25);
+            border: 1px solid rgba(136, 116, 212, 0.25);
             margin-bottom: 2rem;
         }
         .hero-card h1 {
@@ -33,48 +33,104 @@ st.markdown(
             margin: 0.45rem 0 0;
             color: #534884;
         }
+
+        /* Section box */
         .section-box {
-            background: rgba(255, 255, 255, 0.95);
+            background: rgba(255, 255, 255, 0.96);
             border-radius: 20px;
-            padding: 24px 28px;
-            box-shadow: 0 16px 34px rgba(135, 115, 210, 0.15);
+            padding: 26px 30px;
+            box-shadow: 0 16px 36px rgba(135, 115, 210, 0.16);
             border: 1px solid rgba(151, 128, 226, 0.18);
-            margin-bottom: 1.8rem;
+            margin-bottom: 2rem;
         }
         .section-title {
             font-size: 1.3rem;
             font-weight: 700;
             color: #3a296f;
-            margin-bottom: 1rem;
+            margin-bottom: 1.2rem;
             display: flex;
             align-items: center;
             gap: 0.6rem;
         }
+
+        /* Daily input row spacing */
+        div[data-testid="stHorizontalBlock"] {
+            margin-bottom: 0.5rem !important;
+        }
+        label, input, div[data-baseweb="checkbox"] {
+            margin-top: 0.25rem !important;
+        }
+
+        /* Column spacing balance */
+        [data-testid="stColumn"] {
+            padding-right: 0.4rem !important;
+            padding-left: 0.4rem !important;
+        }
+
+        /* Better mobile responsiveness */
+        @media (max-width: 800px) {
+            .section-box {
+                padding: 18px;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+            }
+            [data-testid="stColumn"] {
+                flex: 1 1 45% !important;
+                margin-bottom: 0.4rem;
+            }
+        }
+
+        /* Buttons */
         div.stButton > button {
             border-radius: 12px;
             border: none;
-            background: linear-gradient(135deg, #7c5edf, #f29bc1);
+            background: linear-gradient(135deg, #7a5bdc, #f29bc1);
             color: white;
             font-weight: 600;
             letter-spacing: 0.04em;
             padding: 0.6rem 1.2rem;
-            box-shadow: 0 14px 28px rgba(121, 87, 216, 0.25);
+            box-shadow: 0 14px 28px rgba(121, 87, 216, 0.28);
             transition: all 0.18s ease-in-out;
         }
         div.stButton > button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 18px 36px rgba(121, 87, 216, 0.32);
+            box-shadow: 0 18px 36px rgba(121, 87, 216, 0.36);
         }
+
+        /* Prevent checkbox labels like "Holiday" from wrapping */
+        div[data-baseweb="checkbox"] {
+            display: flex !important;
+            align-items: center !important;
+            white-space: nowrap !important;
+        }
+
+        /* Make checkbox labels slightly smaller so both fit side by side */
+        div[data-baseweb="checkbox"] label {
+            font-size: 0.92rem !important;
+            white-space: nowrap !important;
+            line-height: 1.1 !important;
+            margin-left: 4px !important;
+        }
+
+        /* Adjust column spacing so checkboxes stay centered and inline */
+        [data-testid="stColumn"] {
+            padding-right: 0.4rem !important;
+            padding-left: 0.4rem !important;
+        }
+
+
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+
 st.markdown(
     """
     <div class="hero-card">
         <h1>📦 CADC Manpower Forecast Tool</h1>
-        <p>📅 Handles carryover, holidays, and 3-3-0 SLA distribution across the week.</p>
+        <p>📅 Handles carryover, holiday pushes, and the 3-3-0 SLA across the week.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -87,6 +143,10 @@ PICKING_RATE = 95
 RUNNER_RATIO = 5
 DATA_FILE = "forecast_history.csv"
 CARRY_FILE = "carryover_log.csv"
+
+DEFAULT_FTE = 10
+DEFAULT_FT_OFF = 2
+DEFAULT_RETAIL = 9
 
 # ============================= HELPERS =============================
 def day_name(dt: datetime.date) -> str:
@@ -108,8 +168,8 @@ def next_working_index(start: int, names: List[str], peaks: List[bool], holidays
     return None
 
 
-def load_history_defaults(week_end_date: datetime.date) -> dict:
-    defaults: dict[str, tuple[int, bool, bool]] = {}
+def load_history_defaults(week_end_date: datetime.date) -> Dict[str, Tuple[int, bool, bool, int, int, int]]:
+    defaults: Dict[str, Tuple[int, bool, bool, int, int, int]] = {}
     if not os.path.exists(DATA_FILE):
         return defaults
     try:
@@ -135,7 +195,26 @@ def load_history_defaults(week_end_date: datetime.date) -> dict:
             holiday_val = row.get("IsHoliday", False)
             if isinstance(holiday_val, str):
                 holiday_val = holiday_val.strip().lower() == "true"
-            defaults[str(row_date)] = (orders_val, bool(peak_val), bool(holiday_val))
+            try:
+                fte_val = int(float(row.get("FTE", DEFAULT_FTE)))
+            except Exception:
+                fte_val = DEFAULT_FTE
+            try:
+                ft_off_val = int(float(row.get("FTOff", DEFAULT_FT_OFF)))
+            except Exception:
+                ft_off_val = DEFAULT_FT_OFF
+            try:
+                retail_val = int(float(row.get("RetailSupport", DEFAULT_RETAIL)))
+            except Exception:
+                retail_val = DEFAULT_RETAIL
+            defaults[str(row_date)] = (
+                orders_val,
+                bool(peak_val),
+                bool(holiday_val),
+                fte_val,
+                ft_off_val,
+                retail_val,
+            )
     except Exception:
         defaults = {}
     return defaults
@@ -143,14 +222,6 @@ def load_history_defaults(week_end_date: datetime.date) -> dict:
 
 # ============================= INPUT SECTION =============================
 st.markdown('<div class="section-box"><div class="section-title">⚙️ Weekly Inputs</div>', unsafe_allow_html=True)
-
-col_a, col_b, col_c = st.columns(3)
-with col_a:
-    fte_present = st.number_input("FTE Present", min_value=0, value=10)
-with col_b:
-    ft_off = st.number_input("FT Off", min_value=0, value=2)
-with col_c:
-    retail_ttb = st.number_input("Retail/TTB/OTC/Salon", min_value=0, value=9)
 
 week_end = st.date_input("📅 Week End Date (Saturday)")
 if week_end.weekday() != 5:
@@ -162,11 +233,9 @@ prev_saturday = week_start - timedelta(days=1)
 carry_default = 0
 if os.path.exists(CARRY_FILE):
     carry_log = pd.read_csv(CARRY_FILE)
-    if not carry_log.empty:
-        column = "SaturdayOrders" if "SaturdayOrders" in carry_log.columns else None
-        if column:
-            carry_default = float(carry_log[column].iloc[-1])
-            st.info(f"📦 Carryover from previous Saturday: **{carry_default:,.0f} orders**")
+    if not carry_log.empty and "SaturdayOrders" in carry_log.columns:
+        carry_default = float(carry_log.iloc[-1]["SaturdayOrders"])
+        st.info(f"📦 Carryover from previous Saturday: **{carry_default:,.0f} orders**")
 
 prev_sat_orders = st.number_input(
     f"📦 Previous Saturday ({prev_saturday.strftime('%a %b %d, %Y')}) Orders",
@@ -179,16 +248,26 @@ history_defaults = load_history_defaults(week_end)
 
 st.markdown("#### 🧾 Daily Orders & Flags")
 orders, peaks, holidays = [], [], []
+fte_list, ft_off_list, retail_list = [], [], []
 for dt in week_dates:
     label = dt.strftime("%a %b %d, %Y")
-    default_orders, default_peak, default_holiday = history_defaults.get(str(dt), (0, False, False))
-    c1, c2, c3 = st.columns([1.5, 0.6, 0.6])
+    default_orders, default_peak, default_holiday, default_fte, default_ft_off, default_retail = history_defaults.get(
+        str(dt),
+        (0, False, False, DEFAULT_FTE, DEFAULT_FT_OFF, DEFAULT_RETAIL),
+    )
+    c1, c2, c3, c4, c5, c6 = st.columns([1.3, 0.8, 0.8, 0.8, 0.8, 0.9])
     val = c1.number_input(label, min_value=0, step=1, value=int(default_orders), key=f"orders_{week_end}_{dt}")
     peak_flag = c2.checkbox("Peak", value=default_peak, key=f"peak_{week_end}_{dt}")
     holiday_flag = c3.checkbox("Holiday", value=default_holiday, key=f"holiday_{week_end}_{dt}")
+    fte_val = c4.number_input("FTE", min_value=0, step=1, value=int(default_fte), key=f"fte_{week_end}_{dt}")
+    ft_off_val = c5.number_input("FT off", min_value=0, step=1, value=int(default_ft_off), key=f"ftoff_{week_end}_{dt}")
+    retail_val = c6.number_input("Retail", min_value=0, step=1, value=int(default_retail), key=f"retail_{week_end}_{dt}")
     orders.append(val)
     peaks.append(peak_flag)
     holidays.append(holiday_flag)
+    fte_list.append(fte_val)
+    ft_off_list.append(ft_off_val)
+    retail_list.append(retail_val)
 st.markdown("</div>", unsafe_allow_html=True)
 
 original_orders = orders.copy()
@@ -236,7 +315,6 @@ for i, name in enumerate(day_names):
     NormalSLA.append(normal_val)
 
 processed = [PeakSLA[i] if peaks[i] else NormalSLA[i] for i in range(7)]
-
 for i in range(7):
     if holidays[i] and processed[i] > 0:
         carry = processed[i]
@@ -260,7 +338,7 @@ for i, orders_today in enumerate(processed):
     pack_hc.append(round(pack, 2))
     pick_hc.append(round(pick, 2))
     total_hc.append(total)
-    mp_required.append(max(0, math.ceil(total + retail_ttb - fte_present + ft_off)))
+    mp_required.append(max(0, math.ceil(total + retail_list[i] - fte_list[i] + ft_off_list[i])))
 
 
 df = pd.DataFrame({
@@ -269,6 +347,9 @@ df = pd.DataFrame({
     "IsPeak": peaks,
     "IsHoliday": holidays,
     "Orders": orders,
+    "FTE": fte_list,
+    "FTOff": ft_off_list,
+    "RetailSupport": retail_list,
     "Day1": Day1,
     "Day2": Day2,
     "NormalSLA": NormalSLA,
@@ -279,6 +360,27 @@ df = pd.DataFrame({
     "TotalHC": total_hc,
     "MPRequired": mp_required,
 })
+
+# ============================= DAILY SUMMARY METRICS =============================
+st.markdown('<div class="section-box"><div class="section-title">📅 Daily MP Snapshot</div>', unsafe_allow_html=True)
+cols = st.columns(3)
+
+# Sort to start from Sunday
+day_order = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+df_sorted = df.set_index("Day").loc[day_order].reset_index()
+
+for i, (_, row) in enumerate(df_sorted.iterrows()):
+
+    col = cols[i % 3]
+    with col:
+        st.metric(
+            label=f"{row['Day']}\nProcessed: {row['Processed Orders']:,.0f}",
+            value=f"MP {int(row['MPRequired'])}",
+            delta=f"HC {row['TotalHC']}" if row['TotalHC'] else None,
+        )
+    if (i % 3) == 2 and i < len(df) - 1:
+        cols = st.columns(3)
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================= DISPLAY =============================
 st.markdown('<div class="section-box"><div class="section-title">📊 Daily Breakdown</div>', unsafe_allow_html=True)
