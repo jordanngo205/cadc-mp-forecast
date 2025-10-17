@@ -1,7 +1,7 @@
 ﻿import math
 import os
-from datetime import datetime, timedelta
-from typing import List, Dict, Tuple
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -147,6 +147,7 @@ CARRY_FILE = "carryover_log.csv"
 DEFAULT_FTE = 10
 DEFAULT_FT_OFF = 2
 DEFAULT_RETAIL = 9
+BRANDS_OF_INTEREST = {"clinique", "estee lauder"}
 
 # ============================= HELPERS =============================
 def day_name(dt: datetime.date) -> str:
@@ -220,10 +221,112 @@ def load_history_defaults(week_end_date: datetime.date) -> Dict[str, Tuple[int, 
     return defaults
 
 
+def parse_forecast_upload(upload_file) -> Tuple[Optional[date], Dict[date, int]]:
+    """
+    Extract the week end date and combined Clinique + Estée Lauder orders from a forecast CSV.
+    The file includes two non-data header rows; they are skipped before parsing.
+    """
+    if upload_file is None:
+        return None, {}
+
+    try:
+        upload_file.seek(0)
+    except Exception:
+        pass
+
+    try:
+        raw_df = pd.read_csv(
+            upload_file,
+            skiprows=2,
+            usecols=[0, 1, 2, 3],
+            dtype=str,
+            engine="python",
+        )
+    except Exception as exc:
+        raise ValueError(f"Unable to read CSV: {exc}") from exc
+
+    raw_df.columns = [col.strip() for col in raw_df.columns]
+    week_col = next((col for col in raw_df.columns if col.strip().lower().startswith("week")), None)
+    date_col = next((col for col in raw_df.columns if col.strip().lower() == "date"), None)
+    brand_col = next((col for col in raw_df.columns if col.strip().lower() == "brand"), None)
+    orders_col = next((col for col in raw_df.columns if col.strip().lower().startswith("orders")), None)
+
+    if not all([week_col, date_col, brand_col, orders_col]):
+        raise ValueError("CSV is missing required columns: Week End Date, Date, Brand, Orders.")
+
+    parsed_week = pd.to_datetime(raw_df[week_col], errors="coerce").dt.date
+    week_end_date: Optional[date] = None
+    if not parsed_week.dropna().empty:
+        week_end_date = parsed_week.dropna().iloc[0]
+
+    raw_df["__date"] = pd.to_datetime(raw_df[date_col], errors="coerce").dt.date
+    raw_df["__brand"] = (
+        raw_df[brand_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace("é", "e", regex=False)
+    )
+
+    def _to_int(value: Optional[str]) -> int:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return 0
+        cleaned = str(value).replace('"', "").replace("'", "").strip()
+        cleaned = cleaned.replace(",", "")
+        cleaned = cleaned.replace("\u00a0", "").replace(" ", "")
+        if cleaned in {"", "-", "–"}:
+            return 0
+        try:
+            return int(round(float(cleaned)))
+        except ValueError:
+            return 0
+
+    raw_df["__orders"] = raw_df[orders_col].apply(_to_int)
+
+    filtered = raw_df[raw_df["__brand"].isin(BRANDS_OF_INTEREST)].dropna(subset=["__date"])
+    if filtered.empty:
+        return week_end_date, {}
+
+    orders_by_date = filtered.groupby("__date")["__orders"].sum()
+    orders_lookup: Dict[date, int] = {day: int(total) for day, total in orders_by_date.items()}
+    return week_end_date, orders_lookup
+
+
 # ============================= INPUT SECTION =============================
 st.markdown('<div class="section-box"><div class="section-title">⚙️ Weekly Inputs</div>', unsafe_allow_html=True)
 
-week_end = st.date_input("📅 Week End Date (Saturday)")
+uploaded_week_end: Optional[date] = None
+uploaded_orders_lookup: Dict[date, int] = {}
+
+uploaded_file = st.file_uploader(
+    "📄 Upload Forecast CSV",
+    type=["csv"],
+    help="Optional: skip the first 2 header rows automatically and prefill daily orders for Clinique + Estee Lauder.",
+)
+if uploaded_file is not None:
+    try:
+        detected_week_end, detected_orders = parse_forecast_upload(uploaded_file)
+        uploaded_week_end = detected_week_end
+        uploaded_orders_lookup = detected_orders
+        if detected_orders:
+            if detected_week_end:
+                st.success(
+                    f"Loaded {len(detected_orders)} day(s) of Clinique + Estee Lauder orders for week ending {detected_week_end:%Y-%m-%d}."
+                )
+            else:
+                st.success(f"Loaded {len(detected_orders)} day(s) of Clinique + Estee Lauder orders from the CSV.")
+        else:
+            st.warning("No Clinique or Estee Lauder rows were found in the uploaded CSV.")
+        if detected_week_end is None:
+            st.info("Week end date was not detected in the file; please choose one manually.")
+    except ValueError as err:
+        st.error(f"CSV parsing error: {err}")
+        uploaded_week_end = None
+        uploaded_orders_lookup = {}
+
+week_end_default = uploaded_week_end or datetime.today().date()
+week_end = st.date_input("📅 Week End Date (Saturday)", value=week_end_default)
 if week_end.weekday() != 5:
     st.warning("⚠️ Expected a Saturday week end. The previous Sunday will be used as the start.")
 week_start = week_end - timedelta(days=6)
@@ -255,6 +358,8 @@ for dt in week_dates:
         str(dt),
         (0, False, False, DEFAULT_FTE, DEFAULT_FT_OFF, DEFAULT_RETAIL),
     )
+    if dt in uploaded_orders_lookup:
+        default_orders = uploaded_orders_lookup[dt]
     c1, c2, c3, c4, c5, c6 = st.columns([1.3, 0.8, 0.8, 0.8, 0.8, 0.9])
     val = c1.number_input(label, min_value=0, step=1, value=int(default_orders), key=f"orders_{week_end}_{dt}")
     peak_flag = c2.checkbox("Peak", value=default_peak, key=f"peak_{week_end}_{dt}")
