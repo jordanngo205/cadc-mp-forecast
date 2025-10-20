@@ -1,4 +1,5 @@
-﻿import math
+﻿import io
+import math
 import os
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -148,6 +149,7 @@ DEFAULT_FTE = 10
 DEFAULT_FT_OFF = 2
 DEFAULT_RETAIL = 9
 BRANDS_OF_INTEREST = {"clinique", "estee lauder"}
+PREFERRED_SHEET = "CA"
 
 # ============================= HELPERS =============================
 def day_name(dt: datetime.date) -> str:
@@ -221,76 +223,237 @@ def load_history_defaults(week_end_date: datetime.date) -> Dict[str, Tuple[int, 
     return defaults
 
 
-def parse_forecast_upload(upload_file) -> Tuple[Optional[date], Dict[date, int]]:
-    """
-    Extract the week end date and combined Clinique + Estée Lauder orders from a forecast CSV.
-    The file includes two non-data header rows; they are skipped before parsing.
-    """
+def _clean_order_value(value: Optional[str]) -> int:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return 0
+    cleaned = str(value).replace('"', "").replace("'", "").strip()
+    cleaned = cleaned.replace(",", "")
+    cleaned = cleaned.replace("\u00a0", "").replace(" ", "")
+    if cleaned in {"", "-", "\u2013"}:
+        return 0
+    try:
+        return int(round(float(cleaned)))
+    except ValueError:
+        return 0
+
+
+def _is_excel_file(file_name: str) -> bool:
+    lowered = (file_name or "").lower()
+    return lowered.endswith((".xlsx", ".xls", ".xlsm", ".xlsb"))
+
+
+def _normalize_forecast_csv(upload_file) -> pd.DataFrame:
     if upload_file is None:
-        return None, {}
+        return pd.DataFrame(columns=["WeekEnd", "Date", "Brand", "Orders"])
 
+    file_name = getattr(upload_file, "name", "") or ""
+    is_excel = _is_excel_file(file_name)
+
+    raw_bytes: Optional[bytes] = None
     try:
-        upload_file.seek(0)
+        raw_bytes = upload_file.read()
     except Exception:
-        pass
+        raw_bytes = None
+    if isinstance(raw_bytes, str):
+        raw_bytes = raw_bytes.ezncode("utf-8")
+
+    buffer: io.BytesIO
+    if raw_bytes is not None:
+        buffer = io.BytesIO(raw_bytes)
+    else:
+        if hasattr(upload_file, "getvalue"):
+            value = upload_file.getvalue()  # type: ignore[attr-defined]
+            if isinstance(value, str):
+                value = value.encode("utf-8")
+            buffer = io.BytesIO(value)
+        else:
+            data = upload_file.read()  # type: ignore[call-arg]
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            buffer = io.BytesIO(data)
 
     try:
-        raw_df = pd.read_csv(
-            upload_file,
-            skiprows=2,
-            usecols=[0, 1, 2, 3],
-            dtype=str,
-            engine="python",
-        )
-    except Exception as exc:
-        raise ValueError(f"Unable to read CSV: {exc}") from exc
+        if is_excel:
+            buffer.seek(0)
+            try:
+                excel_file = pd.ExcelFile(buffer)
+            except Exception as exc:
+                raise ValueError(f"Unable to read Excel workbook: {exc}") from exc
+            target_sheet = PREFERRED_SHEET if PREFERRED_SHEET in excel_file.sheet_names else excel_file.sheet_names[0]
+            try:
+                raw_df = pd.read_excel(
+                    excel_file,
+                    sheet_name=target_sheet,
+                    header=None,
+                    dtype=str,
+                )
+            except Exception as exc:
+                raise ValueError(f"Unable to read sheet '{target_sheet}': {exc}") from exc
+        else:
+            buffer.seek(0)
+            try:
+                raw_df = pd.read_csv(
+                    buffer,
+                    header=None,
+                    dtype=str,
+                    engine="python",
+                )
+            except Exception as exc:
+                raise ValueError(f"Unable to read CSV: {exc}") from exc
+    finally:
+        try:
+            upload_file.seek(0)
+        except Exception:
+            pass
 
-    raw_df.columns = [col.strip() for col in raw_df.columns]
-    week_col = next((col for col in raw_df.columns if col.strip().lower().startswith("week")), None)
-    date_col = next((col for col in raw_df.columns if col.strip().lower() == "date"), None)
-    brand_col = next((col for col in raw_df.columns if col.strip().lower() == "brand"), None)
-    orders_col = next((col for col in raw_df.columns if col.strip().lower().startswith("orders")), None)
+    def _normalize_cell(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        return str(value).strip()
 
-    if not all([week_col, date_col, brand_col, orders_col]):
+    header_idx: Optional[int] = None
+    for idx, row in raw_df.iterrows():
+        normalized_cells = [_normalize_cell(cell).lower() for cell in row.tolist()]
+        if (
+            len(normalized_cells) >= 4
+            and normalized_cells[0] == "week end date"
+            and normalized_cells[1] == "date"
+            and normalized_cells[2] == "brand"
+            and "order" in normalized_cells[3]
+        ):
+            header_idx = idx
+            break
+
+    if header_idx is None:
         raise ValueError("CSV is missing required columns: Week End Date, Date, Brand, Orders.")
 
-    parsed_week = pd.to_datetime(raw_df[week_col], errors="coerce").dt.date
-    week_end_date: Optional[date] = None
-    if not parsed_week.dropna().empty:
-        week_end_date = parsed_week.dropna().iloc[0]
+    header_values_raw = raw_df.iloc[header_idx].tolist()
+    header_values = [_normalize_cell(cell) for cell in header_values_raw]
+    data_df = raw_df.iloc[header_idx + 1 :].copy().reset_index(drop=True)
 
-    raw_df["__date"] = pd.to_datetime(raw_df[date_col], errors="coerce").dt.date
-    raw_df["__brand"] = (
-        raw_df[brand_col]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace("é", "e", regex=False)
+    node_values = (
+        [_normalize_cell(cell) for cell in raw_df.iloc[header_idx - 1].tolist()]
+        if header_idx and header_idx > 0
+        else [""] * len(header_values)
     )
 
-    def _to_int(value: Optional[str]) -> int:
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return 0
-        cleaned = str(value).replace('"', "").replace("'", "").strip()
-        cleaned = cleaned.replace(",", "")
-        cleaned = cleaned.replace("\u00a0", "").replace(" ", "")
-        if cleaned in {"", "-", "–"}:
-            return 0
-        try:
-            return int(round(float(cleaned)))
-        except ValueError:
-            return 0
+    def find_column_index(target: str) -> int:
+        target_lower = target.lower()
+        for idx, name in enumerate(header_values):
+            if name.lower() == target_lower:
+                return idx
+        raise ValueError(target)
 
-    raw_df["__orders"] = raw_df[orders_col].apply(_to_int)
+    try:
+        week_idx = find_column_index("Week End Date")
+        date_idx = find_column_index("Date")
+        brand_idx = find_column_index("Brand")
+    except ValueError as err:
+        raise ValueError("CSV is missing required columns: Week End Date, Date, Brand, Orders.") from err
 
-    filtered = raw_df[raw_df["__brand"].isin(BRANDS_OF_INTEREST)].dropna(subset=["__date"])
+    def column_has_data(col_index: int) -> bool:
+        column = data_df.iloc[:, col_index]
+        if column.dropna().empty:
+            return False
+        for val in column:
+            cell = _normalize_cell(val).lower()
+            if cell not in ("", "-", "nan", "none", "0"):
+                return True
+        return False
+
+    def choose_orders_index(keywords: Tuple[str, ...]) -> Optional[int]:
+        for idx, name in enumerate(header_values):
+            if "order" not in name.lower():
+                continue
+            label = node_values[idx].lower() if idx < len(node_values) else ""
+            if keywords and not any(key in label for key in keywords):
+                continue
+            if column_has_data(idx):
+                return idx
+        return None
+
+    orders_idx: Optional[int] = None
+    for keys in (("all",), ("cadc", "elc"), tuple()):
+        candidate = choose_orders_index(keys)
+        if candidate is not None:
+            orders_idx = candidate
+            break
+
+    if orders_idx is None:
+        raise ValueError("CSV is missing required columns: Week End Date, Date, Brand, Orders.")
+
+    selected = pd.DataFrame({
+        "Week End Date": data_df.iloc[:, week_idx],
+        "Date": data_df.iloc[:, date_idx],
+        "Brand": data_df.iloc[:, brand_idx],
+        "Orders": data_df.iloc[:, orders_idx],
+    })
+
+    normalized = selected.apply(lambda col: col.map(_normalize_cell))
+    normalized = normalized[
+        (normalized["Week End Date"] != "")
+        | (normalized["Date"] != "")
+        | (normalized["Brand"] != "")
+        | (normalized["Orders"] != "")
+    ]
+
+    normalized = pd.DataFrame({
+        "WeekEnd": pd.to_datetime(normalized["Week End Date"], errors="coerce").dt.date,
+        "Date": pd.to_datetime(normalized["Date"], errors="coerce").dt.date,
+        "Brand": (
+            normalized["Brand"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace("\u00e9", "e", regex=False)
+            .str.replace("\u00c9", "e", regex=False)
+        ),
+        "Orders": normalized["Orders"].apply(_clean_order_value),
+    })
+    return normalized
+
+
+def parse_forecast_upload(upload_file) -> Tuple[Optional[date], Dict[date, int]]:
+    """
+    Extract the week end date and combined Clinique + Estee Lauder orders from a forecast CSV.
+    """
+    normalized = _normalize_forecast_csv(upload_file)
+    if normalized.empty:
+        return None, {}
+
+    week_values = normalized["WeekEnd"].dropna()
+    week_end_date: Optional[date] = week_values.iloc[0] if not week_values.empty else None
+
+    filtered = normalized[normalized["Brand"].isin(BRANDS_OF_INTEREST)].dropna(subset=["Date"])
     if filtered.empty:
         return week_end_date, {}
 
-    orders_by_date = filtered.groupby("__date")["__orders"].sum()
+    orders_by_date = filtered.groupby("Date")["Orders"].sum()
     orders_lookup: Dict[date, int] = {day: int(total) for day, total in orders_by_date.items()}
     return week_end_date, orders_lookup
+
+
+def parse_bulk_forecast_upload(upload_file) -> Dict[date, Dict[date, int]]:
+    """
+    Return a mapping of week-end Saturday -> {daily date -> Clinique + Estee Lauder orders}.
+    """
+    normalized = _normalize_forecast_csv(upload_file)
+    if normalized.empty:
+        return {}
+
+    filtered = normalized[normalized["Brand"].isin(BRANDS_OF_INTEREST)].dropna(subset=["Date", "WeekEnd"])
+    if filtered.empty:
+        return {}
+
+    grouped = filtered.groupby(["WeekEnd", "Date"])["Orders"].sum().sort_index()
+    results: Dict[date, Dict[date, int]] = {}
+    for (week_end_value, day), total in grouped.items():
+        week_dict = results.setdefault(week_end_value, {})
+        week_dict[day] = int(total)
+    return results
 
 
 # ============================= INPUT SECTION =============================
@@ -299,31 +462,67 @@ st.markdown('<div class="section-box"><div class="section-title">⚙️ Weekly I
 uploaded_week_end: Optional[date] = None
 uploaded_orders_lookup: Dict[date, int] = {}
 
-uploaded_file = st.file_uploader(
-    "📄 Upload Forecast CSV",
-    type=["csv"],
-    help="Optional: skip the first 2 header rows automatically and prefill daily orders for Clinique + Estee Lauder.",
-)
-if uploaded_file is not None:
-    try:
-        detected_week_end, detected_orders = parse_forecast_upload(uploaded_file)
-        uploaded_week_end = detected_week_end
-        uploaded_orders_lookup = detected_orders
-        if detected_orders:
-            if detected_week_end:
-                st.success(
-                    f"Loaded {len(detected_orders)} day(s) of Clinique + Estee Lauder orders for week ending {detected_week_end:%Y-%m-%d}."
-                )
+tab_weekly, tab_bulk = st.tabs(["Weekly CSV", "Bulk CSV (multi-week)"])
+
+with tab_weekly:
+    weekly_file = st.file_uploader(
+        "📄 Upload single-week forecast",
+        type=["csv", "xlsx", "xls", "xlsm", "xlsb"],
+        help="Prefill one week's Clinique + Estee Lauder orders.",
+        key="weekly_forecast_upload",
+    )
+    if weekly_file is not None:
+        try:
+            detected_week_end, detected_orders = parse_forecast_upload(weekly_file)
+            uploaded_week_end = detected_week_end
+            uploaded_orders_lookup = detected_orders
+            if detected_orders:
+                if detected_week_end:
+                    st.success(
+                        f"Loaded {len(detected_orders)} day(s) for week ending {detected_week_end:%Y-%m-%d}."
+                    )
+                else:
+                    st.success(f"Loaded {len(detected_orders)} day(s) of orders from the CSV.")
             else:
-                st.success(f"Loaded {len(detected_orders)} day(s) of Clinique + Estee Lauder orders from the CSV.")
-        else:
-            st.warning("No Clinique or Estee Lauder rows were found in the uploaded CSV.")
-        if detected_week_end is None:
-            st.info("Week end date was not detected in the file; please choose one manually.")
-    except ValueError as err:
-        st.error(f"CSV parsing error: {err}")
-        uploaded_week_end = None
-        uploaded_orders_lookup = {}
+                st.warning("No Clinique or Estee Lauder rows were found in the uploaded CSV.")
+            if detected_week_end is None:
+                st.info("Week end date was not detected in the file; please choose one manually.")
+        except ValueError as err:
+            st.error(f"CSV parsing error: {err}")
+            uploaded_week_end = None
+            uploaded_orders_lookup = {}
+
+with tab_bulk:
+    bulk_file = st.file_uploader(
+        "📦 Upload multi-week forecast",
+        type=["csv", "xlsx", "xls", "xlsm", "xlsb"],
+        help="Drop in 6 months (or more) of data and pick the week to prefill.",
+        key="bulk_forecast_upload",
+    )
+    if bulk_file is not None:
+        try:
+            bulk_orders = parse_bulk_forecast_upload(bulk_file)
+            if not bulk_orders:
+                st.warning("No Clinique or Estee Lauder rows were found in the bulk CSV.")
+            else:
+                week_options = sorted(bulk_orders.keys())
+                default_week = max(week_options)
+                selected_index = week_options.index(default_week)
+                selected_week = st.selectbox(
+                    "Select week ending Saturday",
+                    options=week_options,
+                    index=selected_index,
+                    format_func=lambda d: d.strftime("%Y-%m-%d"),
+                )
+                uploaded_week_end = selected_week
+                uploaded_orders_lookup = bulk_orders[selected_week]
+                st.success(
+                    f"Loaded {len(uploaded_orders_lookup)} day(s) from bulk file for week ending {selected_week:%Y-%m-%d}."
+                )
+        except ValueError as err:
+            st.error(f"Bulk CSV parsing error: {err}")
+            uploaded_week_end = None
+            uploaded_orders_lookup = {}
 
 week_end_default = uploaded_week_end or datetime.today().date()
 week_end = st.date_input("📅 Week End Date (Saturday)", value=week_end_default)
@@ -543,7 +742,10 @@ if st.button("🧹 Reset Forecast & Carryover Tables"):
         if os.path.exists(file):
             os.remove(file)
     st.toast("🧾 All forecast and carryover data cleared.", icon="✅")
-    st.experimental_rerun()
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:  # Streamlit < 1.25 fallback
+        st.experimental_rerun()
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================= HISTORY =============================
