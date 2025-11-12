@@ -140,7 +140,7 @@ st.markdown(
 # ============================= CONSTANTS =============================
 ORDERS_PER_HOUR = 15
 HOURS_PER_SHIFT = 6
-PICKING_RATE = 95
+PICKING_RATE = 100
 RUNNER_RATIO = 5
 DATA_FILE = "forecast_history.csv"
 CARRY_FILE = "carryover_log.csv"
